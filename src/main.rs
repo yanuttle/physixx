@@ -103,7 +103,7 @@ struct Circle{
 impl Drawable for Circle {
     fn draw(&self, camera: &Camera) {
         let screen_pos = camera.world_to_screen(self.body.pos);
-        draw_circle(screen_pos.x, screen_pos.y, self.radius, self.color);
+        draw_circle(screen_pos.x, screen_pos.y, self.radius * camera.zoom.x, self.color);
     }
 
 }
@@ -116,6 +116,30 @@ impl Circle {
     fn update(&mut self, dt: f32) {
         self.body.update(dt);
     }
+}
+
+fn handle_camera_movement(camera: &mut Camera) {
+    if is_key_down(KeyCode::Z) {
+        camera.zoom_in();
+    }
+    if is_key_down(KeyCode::X) {
+        camera.zoom_out();
+    }
+    if is_key_down(KeyCode::A) {
+        camera.pos += -Vec2::X * 2.0;
+    }
+
+    if is_key_down(KeyCode::D) {
+        camera.pos += Vec2::X * 2.0 ;
+    }
+
+    if is_key_down(KeyCode::W) {
+        camera.pos += Vec2::Y * 2.0;
+    }
+    if is_key_down(KeyCode::S) {
+        camera.pos += -Vec2::Y * 2.0;
+    }
+
 }
 
 /// Implementations of specific body functions for the PointMass struct
@@ -151,7 +175,7 @@ impl Body for PointMass {
 #[macroquad::main("Physixx")]
 async fn main() {
 
-    let camera = Camera::default();
+    let mut camera = Camera::default();
 
     let mut circle = Circle {
         body: PointMass {
@@ -166,10 +190,12 @@ async fn main() {
 
     // for now let y be positive, later, when drawing we will change it
     // a_... means that whatever follows is an acceleration 
-    let a_gravity = vec2(0.0, -1.0);
+    let a_gravity = vec2(0.0, -9.81);
 
     loop {
         let dt = get_frame_time();
+        // handle camera input and movement 
+        handle_camera_movement(&mut camera);
 
         // apply the force of gravity to the object
         circle.apply_force(a_gravity * circle.body.mass);
