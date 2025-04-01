@@ -72,7 +72,6 @@ trait Body {
     // Point masses don't have a torque so we don't want to have to implement applying torque there.
     // fn apply_torque(&mut self, torque: f32);
     fn update(&mut self, dt: f32);
-    fn position(&self) -> Vec2;
 } 
 
 /// min-max bounding box for AABB collision-detection
@@ -115,7 +114,15 @@ impl Drawable for PointMass {
     fn draw(&self, camera: &Camera) {
         let screen_position: Vec2 = camera.world_to_screen(self.pos);
         let screen_radius = self.radius * camera.zoom;
-        draw_ellipse(screen_position.x, screen_position.y, screen_radius.x, screen_radius.y, 90.0, self.color);
+        draw_ellipse(screen_position.x, screen_position.y, screen_radius.x, -screen_radius.y, 90.0, self.color);
+    }
+}
+
+impl Drawable for Static {
+    fn draw(&self, camera: &Camera) {
+        let screen_position: Vec2 = camera.world_to_screen(self.position);
+        let screen_size= self.size * camera.zoom;
+        draw_rectangle(screen_position.x, screen_position.y, screen_size.x,  -screen_size.y, BLACK);
     }
 }
 
@@ -173,10 +180,14 @@ impl Body for PointMass {
         self.force = Vec2::ZERO;
         assert_eq!(self.force, Vec2::ZERO);
     }
+}
 
-    fn position(&self) -> Vec2 {
-        return self.pos;
-    }
+fn gravity_acceleration() -> f32 {
+    9.81
+}
+
+/// returns a 
+fn testPointMassAABB(point_mass: &PointMass, aabb: &AABB) -> Vec2 {
 }
 
 #[macroquad::main("Physixx")]
@@ -186,8 +197,8 @@ async fn main() {
     let mut masses: Vec<PointMass> = vec![];
     
     // define a floor
-    let mut statics: Vec<Static> = vec![
-        Static {position: vec2(-50.0, -10.0), size: vec2(1.0, 100.0), aabb: AABB { dimensions:vec2(1.0,100.0) }}
+    let statics: Vec<Static> = vec![
+        Static {position: vec2(-50.0, -10.0), size: vec2(100.0, 1.0), aabb: AABB { dimensions:vec2(100.0,1.0) }}
     ];
 
     let mut camera = Camera::default();
@@ -206,7 +217,7 @@ async fn main() {
             .ui(&mut *root_ui(), |ui| {
                     Group::new(hash!(), Vec2::new(300., 80.)).ui(ui, |ui| {
                         if ui.button(Vec2::new(260., 55.), "spawn ball") {
-                            masses.push(PointMass { pos: vec2(0.0, 0.0), vel: vec2(2.0, 0.0), force: vec2(0.0,0.0), mass: 1.0, radius: 1.0, color: BLACK });
+                            masses.push(PointMass { pos: vec2(0.0, 0.0), vel: vec2(2.0, 0.0), force: vec2(0.0,0.0), mass: 1.0, radius: 1.0, color: BEIGE});
                         }
                     }) ;
             });
@@ -216,16 +227,32 @@ async fn main() {
         draw_spawn_ui();
 
 
-        clear_background(WHITE);
-
         for mass in &mut masses {
-            mass.draw(&camera);
+            // apply forces
+            let f_gravity = mass.mass * gravity_acceleration() * -Vec2::Y;
+            mass.apply_force(f_gravity);
+
+            // check collisions with statics
+            for other_mass in &statics{
+                if testCircleAABB() == true {
+
+                }
+            }
+
+            // update physics 
             mass.update(dt);
         }
+        clear_background(WHITE);
 
+        // draw
+        for mass in &mut masses {
+            mass.draw(&camera);
+        }
+
+        // draw the floor
+        statics[0].draw(&camera);
 
         next_frame().await;
-
         // println!("{:?}", masses);
     }
 }
