@@ -2,6 +2,7 @@
 use std::vec;
 
 use macroquad::{color, prelude::*, ui::{hash, root_ui, widgets::{self, Group}}};
+use nalgebra::Point;
 
 
 struct Camera {
@@ -77,7 +78,8 @@ trait Body {
 /// min-max bounding box for AABB collision-detection
 struct AABB {
     // min-max top-left and bottom right corner of the box
-    dimensions: Vec2
+    min: Vec2,
+    max: Vec2,
 }
 
 /// A static is a part of the scene, it interacts with objects by not allowing them to pass through. can be used for floors or other things.
@@ -186,8 +188,34 @@ fn gravity_acceleration() -> f32 {
     9.81
 }
 
-/// returns a 
-fn testPointMassAABB(point_mass: &PointMass, aabb: &AABB) -> Vec2 {
+// https://www.r-5.org/files/books/computers/algo-list/realtime-3d/Christer_Ericson-Real-Time_Collision_Detection-EN.pdf
+fn sq_dist_point_AABB(point_mass: &PointMass, b: &AABB) -> f32 {
+    let mut sq_dist: f32 = 0.0;
+
+    let v = point_mass.pos.x;
+    if v < b.min.x {
+        sq_dist += (b.min.x - v) * (b.min.x - v);
+    } 
+    if v > b.max.x {
+        sq_dist += (v - b.max.x) * (v - b.max.x);
+    } 
+
+    if v < b.min.y {
+        sq_dist += (b.min.y - v) * (b.min.y - v);
+    } 
+    if v > b.max.y {
+        sq_dist += (v - b.max.y) * (v - b.max.y);
+    } 
+
+    sq_dist
+}
+
+/// returns whether the point mass intersected with the aabb collider 
+fn testPointMassAABB(point_mass: &PointMass, aabb: &AABB) -> bool {
+    // distance between the center of the point of mass 
+    let sq_dist = sq_dist_point_AABB(point_mass, aabb);
+
+    sq_dist <= point_mass.radius * point_mass.radius
 }
 
 #[macroquad::main("Physixx")]
@@ -198,7 +226,7 @@ async fn main() {
     
     // define a floor
     let statics: Vec<Static> = vec![
-        Static {position: vec2(-50.0, -10.0), size: vec2(100.0, 1.0), aabb: AABB { dimensions:vec2(100.0,1.0) }}
+        Static {position: vec2(-50.0, -10.0), size: vec2(100.0, 1.0), aabb: AABB { max:vec2(0.0,1.0), min: (100.0, 0.0)}}
     ];
 
     let mut camera = Camera::default();
@@ -234,7 +262,7 @@ async fn main() {
 
             // check collisions with statics
             for other_mass in &statics{
-                if testCircleAABB() == true {
+                if testPointMassAABB(&mass, &other_mass.aabb) {
 
                 }
             }
