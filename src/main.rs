@@ -1,9 +1,5 @@
 
-use std::vec;
-
 use macroquad::{color, prelude::*, ui::{hash, root_ui, widgets::{self, Group}}};
-use nalgebra::Point;
-
 
 struct Camera {
     screen_dims: Vec2,
@@ -68,65 +64,178 @@ impl Default for Camera {
         }
     }
 }
-trait Body {
-    fn apply_force(&mut self, force: Vec2);
-    // Point masses don't have a torque so we don't want to have to implement applying torque there.
-    // fn apply_torque(&mut self, torque: f32);
-    fn update(&mut self, dt: f32);
-} 
 
-/// min-max bounding box for AABB collision-detection
-struct AABB {
-    // min-max top-left and bottom right corner of the box
-    min: Vec2,
-    max: Vec2,
-}
-
-/// A static is a part of the scene, it interacts with objects by not allowing them to pass through. can be used for floors or other things.
-struct Static {
-    // position of the top left corner in world coordinates
+struct RigidBody2D {
     position: Vec2,
-    // width, height
-    size: Vec2,
-    aabb: AABB
+    vel: Vec2
 }
-
-/// Represents a point mass, an idealization of some object 
-#[derive(Debug)]
-struct PointMass {
-    pos: Vec2,
-    vel: Vec2,
-    /// represents the accumulated forces that are supposed to be applied in the next update
-    force: Vec2,
-    mass: f32,
-
-    // for drawing and collisions
-    radius: f32,
-
-    color: Color 
-}
-
-trait Drawable {
-    /// draw something on screen relative to some camera
-    fn draw(&self, camera: &Camera);
-}
-
-impl Drawable for PointMass {
-    /// This function draws a point mass as a cicle of radius PointMass.radius and center PointMass.center
-    fn draw(&self, camera: &Camera) {
-        let screen_position: Vec2 = camera.world_to_screen(self.pos);
-        let screen_radius = self.radius * camera.zoom;
-        draw_ellipse(screen_position.x, screen_position.y, screen_radius.x, -screen_radius.y, 90.0, self.color);
+enum Collider {
+    Circle {
+        offset: Vec2,
+        radius: f32
+    },
+    AABB {
+        min: Vec2, 
+        max: Vec2
     }
 }
 
-impl Drawable for Static {
-    fn draw(&self, camera: &Camera) {
-        let screen_position: Vec2 = camera.world_to_screen(self.position);
-        let screen_size= self.size * camera.zoom;
-        draw_rectangle(screen_position.x, screen_position.y, screen_size.x,  -screen_size.y, BLACK);
+// https://www.r-5.org/files/books/computers/algo-list/realtime-3d/Christer_Ericson-Real-Time_Collision_Detection-EN.pdf
+fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
+    if let Collider::AABB{min, max} = aabb {
+        let world_min = body.position + *min;
+        let world_max = body.position + *max;
+        let mut sq_dist: f32 = 0.0;
+
+        let v = point.x;
+        if v < world_min.x {
+            sq_dist += (world_min.x - v) * (world_min.x - v);
+        } 
+        if v > world_max.x {
+            sq_dist += (v - world_max.x) * (v - world_max.x);
+        } 
+
+        let v = point.y;
+        if v < world_min.y {
+            sq_dist += (world_min.y - v) * (world_min.y - v);
+        } 
+        if v > world_max.y {
+            sq_dist += (v - world_max.y) * (v - world_max.y);
+        } 
+
+        sq_dist
+    } else {
+        panic!("sq_dist_aabb called on non-AABB collider");
     }
 }
+
+fn test_circle_aabb(circle: &Collider, aabb: &Collider, circle_body: &RigidBody2D, aabb_body: &RigidBody2D) -> bool {
+    match (circle, aabb) {
+        (
+            Collider::Circle { radius, offset: circle_offset },
+            Collider::AABB {min, max }
+        ) => {
+            // Get the circle's world position.
+            let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
+            // Compute the squared distance from the circle's center to the AABB.
+            let sq_dist = sq_dist_point_aabb(circle_world_pos, aabb, aabb_body);
+            // Compare squared distances to avoid computing a square root.
+            sq_dist < radius * radius
+        },
+        _ => false,
+    }
+}
+
+impl Collider {
+    // transform the position from local collider coordinates to world coodinates (relative to some body)
+    fn world_aabb(&self, body_pos: Vec2) -> Option<(Vec2, Vec2)> {
+        match self {
+            Collider::AABB { min, max } => Some((body_pos + *min, body_pos + *max)),
+            _ => None,
+        }
+    }
+
+    fn world_circle(&self, owner_pos: Vec2) -> Option<Vec2> {
+        match self {
+            Collider::Circle { offset,..} => { Some(owner_pos + *offset)},
+            _ => None
+        }
+    }
+
+    fn collides_with(&self, my_body: &RigidBody2D, other_body: &RigidBody2D,  other: &Collider) -> bool {
+        match (self, other) {
+            // two circles collide if the squared distance between them is smaller than the sum of their squared radii 
+            (Collider::Circle { radius: radius_a , ..},
+            Collider::Circle { radius: radius_b , ..}) => 
+            {
+                let pos_a = self.world_circle(my_body.position).unwrap();
+                let pos_b = other.world_circle(other_body.position).unwrap();
+
+                let dist_sq = pos_a.distance_squared(pos_b);
+
+                dist_sq < (radius_a * radius_a) + (radius_b * radius_b)
+            },
+            
+            // a circle collides with an aabb if the
+            // distance from the center of the circle
+            // to the closest point on the aabb is 
+            // smaller than the radius of the circle
+            (Collider::AABB { .. },
+            Collider::Circle { .. }) =>
+            {
+                test_circle_aabb(other, self, other_body, my_body)
+            },
+
+            (Collider::Circle { .. },
+            Collider::AABB { .. }) =>
+            {
+                test_circle_aabb(self, other, my_body, other_body)
+            },
+
+            (Collider::AABB { .. },
+            Collider::AABB { .. }) => {
+                let min_max_a = self.world_aabb(my_body.position).unwrap();
+                let min_max_b =  other.world_aabb(other_body.position).unwrap();
+
+                let min_a = min_max_a.0;
+                let max_a = min_max_a.1;
+
+                let min_b = min_max_b.0;
+                let max_b = min_max_b.1;
+
+                max_a.x >= min_b.x && max_b.x >= min_a.x &&
+                max_a.y >= min_b.y && max_b.y >= min_a.y 
+            }
+
+        }
+
+    }
+}
+
+
+struct Object {
+    body: Option<RigidBody2D>,
+    collider: Option<Collider>,
+    color: Color
+}
+
+impl Object {
+
+    fn draw(&self, camera: &Camera) {
+        let Some(body) = &self.body else { return; };
+        let Some(collider) = &self.collider else { return; };
+
+        match collider {
+            Collider::Circle { offset, radius } => {
+                let world_pos = body.position + *offset;
+                let screen_pos = camera.world_to_screen(world_pos);
+                let screen_radius = *radius * camera.zoom.x.abs(); // assume uniform zoom
+                draw_circle(screen_pos.x, screen_pos.y, screen_radius, self.color);
+            }
+
+            Collider::AABB { min, max } => {
+                let world_min = body.position + *min;
+                let world_max = body.position + *max;
+
+                let top_left = vec2(world_min.x, world_max.y); // because Y+ is up
+                let size = world_max - world_min;
+
+                let screen_top_left = camera.world_to_screen(top_left);
+                let screen_size = size * camera.zoom;
+
+                draw_rectangle(
+                    screen_top_left.x,
+                    screen_top_left.y,
+                    screen_size.x,
+                    -screen_size.y, // flip Y for screen space
+                    self.color
+                );
+            }
+        }
+    }
+
+}
+
 
 fn draw_zoom_ui(zoom: Vec2) {
     root_ui().label(None, &format!("Zoom: {:.2} x {:.2}", zoom.x, zoom.y));
@@ -160,75 +269,43 @@ fn handle_camera_movement(camera: &mut Camera) {
 
 }
 
-/// Implementations of specific body functions for the PointMass struct
-impl Body for PointMass {
-    
-    fn apply_force(&mut self, force: Vec2) {
-        self.force += force;   
-    }
-
-    /// Advance the simulation by one step.
-    fn update(&mut self, dt: f32) {
-        assert_ne!(self.mass, 0.0, "THE MASS OF AN OBJECT SHOULD NEVER BE ZERO!");
-        // it may be null sometimes tho, like if I want it to be stationary 
-
-        let acc = self.force / self.mass;
-
-        // multiply both with dt for correct units
-        self.vel += acc * dt;
-        self.pos += self.vel * dt;
-
-        // zero out the forces for the next step
-        self.force = Vec2::ZERO;
-        assert_eq!(self.force, Vec2::ZERO);
-    }
-}
 
 fn gravity_acceleration() -> f32 {
     9.81
 }
 
-// https://www.r-5.org/files/books/computers/algo-list/realtime-3d/Christer_Ericson-Real-Time_Collision_Detection-EN.pdf
-fn sq_dist_point_AABB(point_mass: &PointMass, b: &AABB) -> f32 {
-    let mut sq_dist: f32 = 0.0;
+fn check_collisions(objects: &[Object]) {
+    for i in 0..objects.len() {
+        for j in (i + 1)..objects.len() {
+            let a = &objects[i];
+            let b = &objects[j];
 
-    let v = point_mass.pos.x;
-    if v < b.min.x {
-        sq_dist += (b.min.x - v) * (b.min.x - v);
-    } 
-    if v > b.max.x {
-        sq_dist += (v - b.max.x) * (v - b.max.x);
-    } 
+            let (Some(collider_a), Some(body_a)) = (&a.collider, &a.body) else { continue };
+            let (Some(collider_b), Some(body_b)) = (&b.collider, &b.body) else { continue };
 
-    if v < b.min.y {
-        sq_dist += (b.min.y - v) * (b.min.y - v);
-    } 
-    if v > b.max.y {
-        sq_dist += (v - b.max.y) * (v - b.max.y);
-    } 
-
-    sq_dist
+            if collider_a.collides_with(body_a, body_b, collider_b) {
+                println!("Collision detected between object {} and {}", i, j);
+                // You can handle response here later (like bouncing or destroying)
+            }
+        }
+    }
 }
 
-/// returns whether the point mass intersected with the aabb collider 
-fn testPointMassAABB(point_mass: &PointMass, aabb: &AABB) -> bool {
-    // distance between the center of the point of mass 
-    let sq_dist = sq_dist_point_AABB(point_mass, aabb);
-
-    sq_dist <= point_mass.radius * point_mass.radius
-}
 
 #[macroquad::main("Physixx")]
 async fn main() {
 
-    // all of the point masses
-    let mut masses: Vec<PointMass> = vec![];
-    
-    // define a floor
-    let statics: Vec<Static> = vec![
-        Static {position: vec2(-50.0, -10.0), size: vec2(100.0, 1.0), aabb: AABB { max:vec2(0.0,1.0), min: (100.0, 0.0)}}
-    ];
+    // circle
+    let rg1: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0) };
+    let col1: Collider = Collider::Circle { offset: vec2(0.0, 0.0), radius: 3.0 };
+    let obj1: Object = Object { body: Some(rg1), collider: Some(col1), color: BLACK };
 
+    // Rectangle 
+    let rg2: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0) };
+    let col2: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
+    let obj2: Object = Object { body: Some(rg2), collider: Some(col2), color: YELLOW};
+
+    let mut objects = [obj1, obj2];
     let mut camera = Camera::default();
 
     print!("{:?}", camera.world_to_screen(vec2(0.0, 0.0)));
@@ -237,48 +314,17 @@ async fn main() {
         let dt = 1./60.;
         // handle camera input and movement 
         handle_camera_movement(&mut camera);
-
-
-        widgets::Window::new(hash!(), vec2(10., screen_height() - 110.), vec2(320., 100.))
-            .label("mass_spawner")
-            .titlebar(true)
-            .ui(&mut *root_ui(), |ui| {
-                    Group::new(hash!(), Vec2::new(300., 80.)).ui(ui, |ui| {
-                        if ui.button(Vec2::new(260., 55.), "spawn ball") {
-                            masses.push(PointMass { pos: vec2(0.0, 0.0), vel: vec2(2.0, 0.0), force: vec2(0.0,0.0), mass: 1.0, radius: 1.0, color: BEIGE});
-                        }
-                    }) ;
-            });
-
-
         draw_zoom_ui(camera.zoom);
-        draw_spawn_ui();
 
 
-        for mass in &mut masses {
-            // apply forces
-            let f_gravity = mass.mass * gravity_acceleration() * -Vec2::Y;
-            mass.apply_force(f_gravity);
+        check_collisions(&objects);
 
-            // check collisions with statics
-            for other_mass in &statics{
-                if testPointMassAABB(&mass, &other_mass.aabb) {
-
-                }
-            }
-
-            // update physics 
-            mass.update(dt);
-        }
         clear_background(WHITE);
-
-        // draw
-        for mass in &mut masses {
-            mass.draw(&camera);
+        
+        for object in &objects {
+            object.draw(&camera);
         }
 
-        // draw the floor
-        statics[0].draw(&camera);
 
         next_frame().await;
         // println!("{:?}", masses);
