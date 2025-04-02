@@ -1,4 +1,6 @@
 
+use core::panic;
+
 use macroquad::{color, prelude::*, ui::{hash, root_ui, widgets::{self, Group}}};
 
 struct Camera {
@@ -67,8 +69,34 @@ impl Default for Camera {
 
 struct RigidBody2D {
     position: Vec2,
-    vel: Vec2
+    vel: Vec2,
+    // accumulated force
+    accum_force: Vec2,
+    mass: f32
 }
+
+
+
+impl RigidBody2D {
+    fn apply_force(&mut self, force: Vec2) {
+        self.accum_force += force;
+    }
+
+    fn update(&mut self, dt: f32) {
+        if self.mass == 0.0 { return; }
+
+        let acc = self.accum_force / self.mass;
+        self.vel += acc * dt;
+        self.position += self.vel * dt;
+
+        // reset the accumulated forces after update
+        self.accum_force = Vec2::ZERO;
+
+    }
+}
+
+
+
 enum Collider {
     Circle {
         offset: Vec2,
@@ -112,8 +140,8 @@ fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
 fn test_circle_aabb(circle: &Collider, aabb: &Collider, circle_body: &RigidBody2D, aabb_body: &RigidBody2D) -> bool {
     match (circle, aabb) {
         (
-            Collider::Circle { radius, offset: circle_offset },
-            Collider::AABB {min, max }
+            Collider::Circle { radius, ..},
+            Collider::AABB { .. }
         ) => {
             // Get the circle's world position.
             let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
@@ -210,7 +238,7 @@ impl Object {
                 let world_pos = body.position + *offset;
                 let screen_pos = camera.world_to_screen(world_pos);
                 let screen_radius = *radius * camera.zoom.x.abs(); // assume uniform zoom
-                draw_circle(screen_pos.x, screen_pos.y, screen_radius, self.color);
+                draw_circle_lines(screen_pos.x, screen_pos.y, screen_radius, 2.0, self.color);
             }
 
             Collider::AABB { min, max } => {
@@ -223,17 +251,61 @@ impl Object {
                 let screen_top_left = camera.world_to_screen(top_left);
                 let screen_size = size * camera.zoom;
 
-                draw_rectangle(
+                draw_rectangle_lines(
                     screen_top_left.x,
                     screen_top_left.y,
                     screen_size.x,
                     -screen_size.y, // flip Y for screen space
+                    2.0,
                     self.color
                 );
             }
         }
     }
 
+}
+
+struct ObjectBuilder {
+    body: Option<RigidBody2D>,
+    collider: Option<Collider>,
+    color: Option<Color>
+}
+
+impl ObjectBuilder {
+    fn new() -> Self {
+        Self {
+            body: None,
+            collider: None,
+            color: None   
+        }
+    }
+
+    fn with_body(mut self, body: RigidBody2D) -> Self{
+        self.body = Some(body);
+        self
+    }
+
+    fn with_collider(mut self, collider: Collider) -> Self {
+        self.collider = Some(collider);
+        self
+    }
+
+    fn with_color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    fn build(self) -> Object {
+        if let Some(c) = self.color {
+            Object {
+                body: self.body,
+                collider: self.collider,
+                color: c
+            }
+
+        }
+         else {panic!();}
+    }
 }
 
 
@@ -284,7 +356,6 @@ fn check_collisions(objects: &[Object]) {
             let (Some(collider_b), Some(body_b)) = (&b.collider, &b.body) else { continue };
 
             if collider_a.collides_with(body_a, body_b, collider_b) {
-                println!("Collision detected between object {} and {}", i, j);
                 // You can handle response here later (like bouncing or destroying)
             }
         }
@@ -296,28 +367,49 @@ fn check_collisions(objects: &[Object]) {
 async fn main() {
 
     // circle
-    let rg1: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0) };
+    let rg1: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 5.0 };
     let col1: Collider = Collider::Circle { offset: vec2(0.0, 0.0), radius: 3.0 };
-    let obj1: Object = Object { body: Some(rg1), collider: Some(col1), color: BLACK };
+    let obj1: Object = ObjectBuilder::new()
+                                .with_body(rg1)
+                                .with_collider(col1)
+                                .with_color(YELLOW)
+                                .build();
 
-    // Rectangle 
-    let rg2: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0) };
+
+    // Rectangle 2
+    let rg2: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 10.0 };
     let col2: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
-    let obj2: Object = Object { body: Some(rg2), collider: Some(col2), color: YELLOW};
+    let obj2: Object = ObjectBuilder::new()
+                            .with_body(rg2)
+                            .with_collider(col2)
+                            .with_color(PINK)
+                            .build();
 
-    let mut objects = [obj1, obj2];
+    // Rectangle 2
+    let rg3: RigidBody2D = RigidBody2D { position: vec2(-10.0, 20.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 3.0 };
+    let col3: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
+    let obj3: Object = ObjectBuilder::new()
+                            .with_body(rg3)
+                            .with_collider(col3)
+                            .with_color(GREEN)
+                            .build();
+
+    let objects = [obj1, obj2, obj3];
     let mut camera = Camera::default();
 
-    print!("{:?}", camera.world_to_screen(vec2(0.0, 0.0)));
-
     loop {
-        let dt = 1./60.;
         // handle camera input and movement 
         handle_camera_movement(&mut camera);
         draw_zoom_ui(camera.zoom);
 
+        let dt = 1./60.;
 
+        // do physics
         check_collisions(&objects);
+        // apply_gravity
+
+
+
 
         clear_background(WHITE);
         
