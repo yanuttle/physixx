@@ -1,7 +1,8 @@
 
 use core::panic;
-
-use macroquad::{color, prelude::*, ui::{hash, root_ui, widgets::{self, Group}}};
+use std::vec;
+use approx; // For the macro assert_relative_eq!
+use macroquad::{prelude::*, ui::root_ui};
 
 struct Camera {
     screen_dims: Vec2,
@@ -76,7 +77,6 @@ struct RigidBody2D {
 }
 
 
-
 impl RigidBody2D {
     fn apply_force(&mut self, force: Vec2) {
         self.accum_force += force;
@@ -108,12 +108,38 @@ enum Collider {
     }
 }
 
+// returns the point on the aabb surface that is nearest to the given point
+fn point_aabb_nearest_point(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> Vec2 {
+    if let Collider::AABB { min, max } = aabb {
+        let world_min = body.position + *min;
+        let world_max = body.position + *max;
+        let mut nearest_point = vec2(0.0, 0.0);
+
+        if point.x < world_min.x { nearest_point.x = world_min.x;}
+        if point.x > world_max.x { nearest_point.x = world_max.x;} 
+        else if point.x - world_min.x > world_max.x - point.x {nearest_point.x = world_max.x;}
+        else {nearest_point.x = world_min.x}
+
+        if point.y < world_min.y { nearest_point.y = world_min.y;}
+        if point.y > world_max.y { nearest_point.y = world_max.y;} 
+        else if point.y - world_min.y > world_max.y - point.y {nearest_point.y = world_max.y;}
+        else {nearest_point.y = world_min.y}
+
+        nearest_point
+    }
+    else {
+        panic!();
+    }
+}
+
 // https://www.r-5.org/files/books/computers/algo-list/realtime-3d/Christer_Ericson-Real-Time_Collision_Detection-EN.pdf
 fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
     if let Collider::AABB{min, max} = aabb {
         let world_min = body.position + *min;
         let world_max = body.position + *max;
         let mut sq_dist: f32 = 0.0;
+
+
 
         let v = point.x;
         if v < world_min.x {
@@ -137,20 +163,66 @@ fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
     }
 }
 
-fn test_circle_aabb(circle: &Collider, aabb: &Collider, circle_body: &RigidBody2D, aabb_body: &RigidBody2D) -> bool {
+fn is_zero_vector(vector: Vec2) -> bool {
+    approx::abs_diff_eq!(vector.x, 0.0)
+    &&
+    approx::abs_diff_eq!(vector.y, 0.0)
+}
+
+fn test_circle_aabb(circle: &Collider, aabb: &Collider, circle_body: &RigidBody2D, aabb_body: &RigidBody2D) -> Option<Collision>{
     match (circle, aabb) {
         (
             Collider::Circle { radius, ..},
-            Collider::AABB { .. }
+            Collider::AABB { min, max }
         ) => {
             // Get the circle's world position.
             let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
             // Compute the squared distance from the circle's center to the AABB.
-            let sq_dist = sq_dist_point_aabb(circle_world_pos, aabb, aabb_body);
-            // Compare squared distances to avoid computing a square root.
-            sq_dist < radius * radius
+            let nearest_point_to_center = point_aabb_nearest_point(circle_world_pos, aabb, aabb_body);
+            let dist = Vec2::distance(nearest_point_to_center, circle_world_pos);
+            let collision_vector = nearest_point_to_center - circle_world_pos;
+
+            let world_min = *min + aabb_body.position;
+            let world_max = *min + aabb_body.position;
+
+            let mut normal = Vec2::ZERO;
+            if is_zero_vector(collision_vector) {
+                let distance_left = (circle_world_pos.x - world_min.x).abs();
+                let distance_right = (circle_world_pos.x - world_max.x).abs();
+                let distance_bottom= (circle_world_pos.y - world_min.x).abs();
+                let distance_top= (circle_world_pos.y - world_max.x).abs();
+
+                let min_distance = f32::min(distance_left,
+                                 f32::min(distance_right,
+                                 f32::min(distance_bottom,distance_top)));
+
+                if min_distance == distance_left {
+                    normal = -Vec2::X;
+                }
+                if min_distance == distance_right {
+                    normal = Vec2::X;
+                }
+                if min_distance == distance_bottom {
+                    normal = -Vec2::Y;
+                }
+                if min_distance == distance_top {
+                    normal = Vec2::Y;
+                }
+            }
+            
+            // if a collision has occured, compute how it actually happened
+            if dist < *radius {
+                Some(Collision {
+                    depth: *radius - dist,
+                    normal 
+                })
+
+            } else {
+                None
+            }
+
         },
-        _ => false,
+        _ => None,
     }
 }
 
@@ -170,7 +242,7 @@ impl Collider {
         }
     }
 
-    fn collides_with(&self, my_body: &RigidBody2D, other_body: &RigidBody2D,  other: &Collider) -> bool {
+    fn collides_with(&self, my_body: &RigidBody2D, other_body: &RigidBody2D,  other: &Collider) -> Option<Collision>{
         match (self, other) {
             // two circles collide if the squared distance between them is smaller than the sum of their squared radii 
             (Collider::Circle { radius: radius_a , ..},
@@ -178,10 +250,18 @@ impl Collider {
             {
                 let pos_a = self.world_circle(my_body.position).unwrap();
                 let pos_b = other.world_circle(other_body.position).unwrap();
+                let position_difference = pos_b - pos_a;
 
-                let dist_sq = pos_a.distance_squared(pos_b);
+                // this can be used to calculate the distance 
+                let dist = pos_a.distance(pos_b);
 
-                dist_sq < (radius_a * radius_a) + (radius_b * radius_b)
+                if dist < radius_a + radius_b {
+                    let normal = position_difference / dist;
+                    Some(Collision { normal, depth: radius_a + radius_b - dist})
+                }
+                else {
+                    None
+                }
             },
             
             // a circle collides with an aabb if the
@@ -211,8 +291,50 @@ impl Collider {
                 let min_b = min_max_b.0;
                 let max_b = min_max_b.1;
 
-                max_a.x >= min_b.x && max_b.x >= min_a.x &&
-                max_a.y >= min_b.y && max_b.y >= min_a.y 
+                let is_colliding = max_a.x >= min_b.x && max_b.x >= min_a.x &&
+                max_a.y >= min_b.y && max_b.y >= min_a.y;
+
+
+                if is_colliding {
+                    let x_overlap = f32::min(max_a.x.max(max_b.x), max_b.x) - f32::max(min_a.x, min_b.x);
+                    let y_overlap = f32::min(max_a.y, max_b.y) - f32::max(min_a.y, min_b.y);
+
+                    let depth = f32::min(x_overlap, y_overlap);
+                    // if the penetration depth is negative, then there is no penetration, so there is no collision
+                    if depth < 0.0 { return None; }
+                    
+                    let mut normal: Vec2;
+                    if x_overlap > y_overlap {
+                        normal = Vec2::Y;
+                        let top_penetration = max_a.y - min_b.y;
+                        let bottom_penetration = max_b.y - min_a.y;
+
+                        // the object needs to be pushed upwards
+                        // because the upper penetration is smaller
+                        if bottom_penetration < top_penetration {
+                            normal *= -1.0;
+                        }
+                    }
+                    else {
+                        normal = Vec2::X;
+                        let left_penetration = max_a.x - min_b.x;
+                        let right_penetration = max_b.x - min_a.x;
+
+                        // the object needs to be pushed to the left
+                        // because the left penetration is smaller
+                        if left_penetration < right_penetration {
+                            normal *= -1.0;
+                        }
+                    }
+
+                    return Some(Collision {
+                        depth,
+                        normal
+                    })
+                }
+                None
+
+                
             }
 
         }
@@ -341,9 +463,14 @@ fn handle_camera_movement(camera: &mut Camera) {
 
 }
 
+fn gravity_acceleration() -> Vec2 {
+    vec2(0.0, -9.81)
+}
 
-fn gravity_acceleration() -> f32 {
-    9.81
+#[derive(Debug)]
+struct Collision {
+    normal: Vec2,
+    depth: f32 
 }
 
 fn check_collisions(objects: &[Object]) {
@@ -355,13 +482,24 @@ fn check_collisions(objects: &[Object]) {
             let (Some(collider_a), Some(body_a)) = (&a.collider, &a.body) else { continue };
             let (Some(collider_b), Some(body_b)) = (&b.collider, &b.body) else { continue };
 
-            if collider_a.collides_with(body_a, body_b, collider_b) {
+            if let Some(collision) = collider_a.collides_with(body_a, body_b, collider_b) {
                 // You can handle response here later (like bouncing or destroying)
+                println!("body {} collided with body {}!", i, j);
+                println!("collision info gathered: {:?}", collision)
             }
         }
     }
 }
 
+// TODO: delete
+fn apply_gravity(objects: &mut [Object]) {
+    for object in objects.iter_mut()  {
+        let (Some(_), Some(body)) = (&object.collider, &mut object.body) else {continue };
+
+        body.apply_force(body.mass * gravity_acceleration()); 
+
+    }
+}
 
 #[macroquad::main("Physixx")]
 async fn main() {
@@ -377,7 +515,7 @@ async fn main() {
 
 
     // Rectangle 2
-    let rg2: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 10.0 };
+    let rg2: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(-2.0, 10.0), accum_force: vec2(0.0, 0.0), mass: 10.0 };
     let col2: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
     let obj2: Object = ObjectBuilder::new()
                             .with_body(rg2)
@@ -385,8 +523,8 @@ async fn main() {
                             .with_color(PINK)
                             .build();
 
-    // Rectangle 2
-    let rg3: RigidBody2D = RigidBody2D { position: vec2(-10.0, 20.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 3.0 };
+    // Rectangle 3
+    let rg3: RigidBody2D = RigidBody2D { position: vec2(-10.0, 20.0), vel: vec2(1.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 3.0 };
     let col3: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
     let obj3: Object = ObjectBuilder::new()
                             .with_body(rg3)
@@ -394,7 +532,7 @@ async fn main() {
                             .with_color(GREEN)
                             .build();
 
-    let objects = [obj1, obj2, obj3];
+    let mut objects = [obj1, obj2, obj3];
     let mut camera = Camera::default();
 
     loop {
@@ -406,14 +544,17 @@ async fn main() {
 
         // do physics
         check_collisions(&objects);
+
         // apply_gravity
+        apply_gravity(&mut objects);
 
-
-
+        
+        
 
         clear_background(WHITE);
         
-        for object in &objects {
+        for object in objects.as_mut() {
+            object.body.as_mut().unwrap().update(dt);
             object.draw(&camera);
         }
 
