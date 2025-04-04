@@ -73,7 +73,8 @@ struct RigidBody2D {
     vel: Vec2,
     // accumulated force
     accum_force: Vec2,
-    mass: f32
+    mass: f32,
+    is_static: bool
 }
 
 
@@ -83,7 +84,9 @@ impl RigidBody2D {
     }
 
     fn update(&mut self, dt: f32) {
-        if self.mass == 0.0 { return; }
+
+
+        if self.mass == 0.0 || self.is_static { return; }
 
         let acc = self.accum_force / self.mass;
         self.vel += acc * dt;
@@ -114,14 +117,16 @@ fn point_aabb_nearest_point(point: Vec2, aabb: &Collider, body: &RigidBody2D) ->
         let world_min = body.position + *min;
         let world_max = body.position + *max;
         let mut nearest_point = vec2(0.0, 0.0);
-
-        if point.x < world_min.x { nearest_point.x = world_min.x;}
-        if point.x > world_max.x { nearest_point.x = world_max.x;} 
+        
+        if point.x <= world_max.x && point.x >= world_min.x { nearest_point.x = point.x }
+        else if point.x < world_min.x { nearest_point.x = world_min.x;}
+        else if point.x > world_max.x { nearest_point.x = world_max.x;} 
         else if point.x - world_min.x > world_max.x - point.x {nearest_point.x = world_max.x;}
         else {nearest_point.x = world_min.x}
 
-        if point.y < world_min.y { nearest_point.y = world_min.y;}
-        if point.y > world_max.y { nearest_point.y = world_max.y;} 
+        if point.y <= world_max.y && point.y >= world_min.y { nearest_point.y = point.y }
+        else if point.y < world_min.y { nearest_point.y = world_min.y;}
+        else if point.y > world_max.y { nearest_point.y = world_max.y;} 
         else if point.y - world_min.y > world_max.y - point.y {nearest_point.y = world_max.y;}
         else {nearest_point.y = world_min.y}
 
@@ -163,7 +168,7 @@ fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
     }
 }
 
-fn is_zero_vector(vector: Vec2) -> bool {
+fn is_close_to_zero(vector: Vec2) -> bool {
     approx::abs_diff_eq!(vector.x, 0.0)
     &&
     approx::abs_diff_eq!(vector.y, 0.0)
@@ -179,14 +184,18 @@ fn test_circle_aabb(circle: &Collider, aabb: &Collider, circle_body: &RigidBody2
             let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
             // Compute the squared distance from the circle's center to the AABB.
             let nearest_point_to_center = point_aabb_nearest_point(circle_world_pos, aabb, aabb_body);
+
+
             let dist = Vec2::distance(nearest_point_to_center, circle_world_pos);
             let collision_vector = nearest_point_to_center - circle_world_pos;
 
             let world_min = *min + aabb_body.position;
-            let world_max = *min + aabb_body.position;
+            let world_max = *max + aabb_body.position;
 
-            let mut normal = Vec2::ZERO;
-            if is_zero_vector(collision_vector) {
+
+
+            let mut normal = collision_vector;
+            if is_close_to_zero(normal) {
                 let distance_left = (circle_world_pos.x - world_min.x).abs();
                 let distance_right = (circle_world_pos.x - world_max.x).abs();
                 let distance_bottom= (circle_world_pos.y - world_min.x).abs();
@@ -209,6 +218,8 @@ fn test_circle_aabb(circle: &Collider, aabb: &Collider, circle_body: &RigidBody2
                     normal = Vec2::Y;
                 }
             }
+
+            normal = normal.normalize();
             
             // if a collision has occured, compute how it actually happened
             if dist < *radius {
@@ -359,7 +370,7 @@ impl Object {
             Collider::Circle { offset, radius } => {
                 let world_pos = body.position + *offset;
                 let screen_pos = camera.world_to_screen(world_pos);
-                let screen_radius = *radius * camera.zoom.x.abs(); // assume uniform zoom
+                let screen_radius = *radius * camera.zoom.x; // assume uniform zoom
                 draw_circle_lines(screen_pos.x, screen_pos.y, screen_radius, 2.0, self.color);
             }
 
@@ -473,25 +484,35 @@ struct Collision {
     depth: f32 
 }
 
-fn check_collisions(objects: &[Object]) {
-    for i in 0..objects.len() {
-        for j in (i + 1)..objects.len() {
-            let a = &objects[i];
-            let b = &objects[j];
+fn resolve_collision(body: &mut RigidBody2D, collision: Collision) {
 
-            let (Some(collider_a), Some(body_a)) = (&a.collider, &a.body) else { continue };
-            let (Some(collider_b), Some(body_b)) = (&b.collider, &b.body) else { continue };
+    if !body.is_static {
+        body.position -= 2.0*collision.normal * collision.depth;
+    }
+
+
+
+
+}
+
+fn check_collisions(objects: &mut [Object]) {
+    for i in 0..objects.len() {
+        let (left, right) = objects.split_at_mut(i + 1);
+        let a = &mut left[i];
+        for b in right {
+
+            let (Some(collider_a), Some(body_a)) = (&a.collider, a.body.as_mut()) else { continue };
+            let (Some(collider_b), Some(body_b)) = (&b.collider, b.body.as_mut()) else { continue };
 
             if let Some(collision) = collider_a.collides_with(body_a, body_b, collider_b) {
-                // You can handle response here later (like bouncing or destroying)
-                println!("body {} collided with body {}!", i, j);
-                println!("collision info gathered: {:?}", collision)
+                println!("Collision: (normal, depth) -- {} {}", collision.normal, collision.depth);
+                resolve_collision(body_a, collision);
             }
         }
     }
 }
 
-// TODO: delete
+// TODO: delete later
 fn apply_gravity(objects: &mut [Object]) {
     for object in objects.iter_mut()  {
         let (Some(_), Some(body)) = (&object.collider, &mut object.body) else {continue };
@@ -505,7 +526,7 @@ fn apply_gravity(objects: &mut [Object]) {
 async fn main() {
 
     // circle
-    let rg1: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 5.0 };
+    let mut rg1: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(0.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 5.0, is_static: false };
     let col1: Collider = Collider::Circle { offset: vec2(0.0, 0.0), radius: 3.0 };
     let obj1: Object = ObjectBuilder::new()
                                 .with_body(rg1)
@@ -515,8 +536,8 @@ async fn main() {
 
 
     // Rectangle 2
-    let rg2: RigidBody2D = RigidBody2D { position: vec2(0.0, 0.0), vel: vec2(-2.0, 10.0), accum_force: vec2(0.0, 0.0), mass: 10.0 };
-    let col2: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
+    let mut rg2: RigidBody2D = RigidBody2D { position: vec2(-100.0, -10.0), vel: vec2(-2.0, 10.0), accum_force: vec2(0.0, 0.0), mass: 10.0, is_static: true};
+    let col2: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(200.0, 0.0) };
     let obj2: Object = ObjectBuilder::new()
                             .with_body(rg2)
                             .with_collider(col2)
@@ -524,7 +545,7 @@ async fn main() {
                             .build();
 
     // Rectangle 3
-    let rg3: RigidBody2D = RigidBody2D { position: vec2(-10.0, 20.0), vel: vec2(1.0, 0.0), accum_force: vec2(0.0, 0.0), mass: 3.0 };
+    let mut rg3: RigidBody2D = RigidBody2D { position: vec2(-30.0, 20.0), vel: vec2(1.0, -2.0), accum_force: vec2(0.0, 0.0), mass: 3.0, is_static: false };
     let col3: Collider = Collider::AABB { min: vec2(0.0, -10.0), max: vec2(20.0, 0.0) };
     let obj3: Object = ObjectBuilder::new()
                             .with_body(rg3)
@@ -533,6 +554,8 @@ async fn main() {
                             .build();
 
     let mut objects = [obj1, obj2, obj3];
+    // TODO: uncomment
+    // let mut camera = Camera::default();
     let mut camera = Camera::default();
 
     loop {
@@ -540,10 +563,11 @@ async fn main() {
         handle_camera_movement(&mut camera);
         draw_zoom_ui(camera.zoom);
 
+        clear_background(WHITE);
         let dt = 1./60.;
 
         // do physics
-        check_collisions(&objects);
+        check_collisions(&mut objects);
 
         // apply_gravity
         apply_gravity(&mut objects);
@@ -551,7 +575,6 @@ async fn main() {
         
         
 
-        clear_background(WHITE);
         
         for object in objects.as_mut() {
             object.body.as_mut().unwrap().update(dt);
