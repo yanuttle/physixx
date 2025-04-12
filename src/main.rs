@@ -10,6 +10,119 @@ struct Camera {
     zoom_factor: f32,
 }
 
+struct RigidBody2DBuilder {
+    position: Vec2,
+    angle: f32,
+
+    angular_vel: f32,
+    vel: Vec2,
+    // accumulated force
+    accum_force: Vec2,
+    accum_torque: f32,
+    inverse_mass: f32,
+    inverse_inertia: f32,
+    is_static: bool,
+    shape: Option<Collider>,
+    restitution: f32,
+}
+
+impl RigidBody2DBuilder {
+    fn new() -> Self {
+        Self {
+            position: Vec2::ZERO,
+            angle: 0.0,
+            vel: Vec2::ZERO,
+            angular_vel: 0.0,
+            accum_force: Vec2::ZERO,
+            accum_torque: 0.0,
+            inverse_mass: 1.0,
+            inverse_inertia: 1.0,
+            is_static: false,
+            shape: None,
+            restitution: 0.5,
+        }
+    }
+
+    fn with_position(mut self, position: Vec2) -> Self {
+        self.position = position;
+        self
+    }
+
+    fn with_angle(mut self, angle: f32) -> Self {
+        self.angle = angle;
+        self
+    }
+
+    fn with_shape(mut self, shape: Collider) -> Self {
+        self.shape = Some(shape);
+        self
+    }
+
+    fn with_inverse_mass(mut self, inv_mass: f32) -> Self {
+        self.inverse_mass = inv_mass;
+        self
+    }
+
+    fn with_angular_vel(mut self, ang_vel: f32) -> Self {
+        self.angular_vel = ang_vel;
+        self
+    }
+
+    fn with_vel(mut self, vel: Vec2) -> Self {
+        self.vel = vel;
+        self
+    }
+
+    fn make_static(mut self) -> Self {
+        self.is_static = true;
+        self
+    }
+
+    fn with_restitution(mut self, restitution: f32) -> Self {
+        self.restitution = restitution;
+        self
+    }
+
+    fn build(self) -> RigidBody2D {
+        // calculate the inverse inertia of the body if a shape was provided
+        let mut rb = RigidBody2D {
+            position: self.position,
+            angle: self.angle,
+            angular_vel: self.angular_vel,
+            vel: self.vel,
+            accum_force: self.accum_force,
+            accum_torque: self.accum_torque,
+            inverse_mass: self.inverse_mass,
+            inverse_inertia: self.inverse_inertia,
+            is_static: self.is_static,
+            restitution: self.restitution,
+        };
+
+        if rb.is_static {
+            rb.inverse_mass = 0.0;
+            rb.inverse_inertia = 0.0;
+            return rb;
+        }
+
+        if let Some(shape) = self.shape {
+            match shape {
+                Collider::AABB { min, max } => {
+                    let h = (max.y - min.y).abs();
+                    let w = (max.x - min.x).abs();
+                    let m = 1.0 / self.inverse_mass;
+                    rb.inverse_inertia = (1.0 / 12.0) * m * (w * w + h * h);
+                }
+                Collider::Circle { radius, .. } => {
+                    let m = 1.0 / self.inverse_mass;
+                    rb.inverse_inertia = 0.5 * m * radius * radius;
+                }
+            }
+        }
+
+        rb
+    }
+}
+
 struct ObjectBuilder {
     body: Option<RigidBody2D>,
     collider: Option<Collider>,
@@ -118,12 +231,18 @@ impl Default for Camera {
 
 struct RigidBody2D {
     position: Vec2,
-    acc: Vec2,
+    angle: f32,
+    // acc: Vec2,
+    angular_vel: f32,
     vel: Vec2,
     // accumulated force
     accum_force: Vec2,
+    accum_torque: f32,
+
     inverse_mass: f32,
+    inverse_inertia: f32,
     is_static: bool,
+    restitution: f32,
 }
 
 impl RigidBody2D {
@@ -135,23 +254,35 @@ impl RigidBody2D {
         self.vel += impulse * self.inverse_mass;
     }
 
+    /// update using verlet integration
     fn update(&mut self, dt: f32) {
         if self.inverse_mass == 0.0 || self.is_static {
             return;
         }
-        let new_pos = self.position + self.vel * dt + self.acc * (dt * dt * 0.5);
-        let new_acc = self.accum_force * self.inverse_mass;
-        let new_vel = self.vel + (self.acc + new_acc) * (dt * 0.5);
+        // NOTE: this is euler
+        let new_vel = self.vel + dt * self.inverse_mass * self.accum_force;
+        let new_pos = self.position + new_vel * dt;
+
+        let new_ang_vel = self.angular_vel + dt * self.inverse_inertia * self.accum_torque;
+        let new_angle = self.angle + new_ang_vel * dt;
+
+        // NOTE: this is verlet
+        // let new_pos = self.position + self.vel * dt + self.acc * (dt * dt * 0.5);
+        // let new_acc = self.accum_force * self.inverse_mass;
+        // let new_vel = self.vel + (self.acc + new_acc) * (dt * 0.5);
 
         self.position = new_pos;
+        self.angle = new_angle;
+        self.angular_vel = new_ang_vel;
         self.vel = new_vel;
-        self.acc = new_acc;
 
-        // reset the accumulated forces after update
+        // reset the accumulated forces and torques after update
         self.accum_force = Vec2::ZERO;
+        self.accum_torque = 0.0;
     }
 }
 
+#[derive(Clone)]
 enum Collider {
     Circle { offset: Vec2, radius: f32 },
     AABB { min: Vec2, max: Vec2 },
@@ -235,73 +366,19 @@ fn test_aabb_circle(
     aabb_index: usize,
     circle_index: usize,
 ) -> Option<Contact> {
-    // Ensure the first collider is an AABB and the second is a Circle.
-    if let (Collider::AABB { min, max }, Collider::Circle { radius, .. }) = (aabb, circle) {
-        // Compute the world-space boundaries of the AABB.
-        let world_min = aabb_body.position + *min;
-        let world_max = aabb_body.position + *max;
-        // Obtain the circle's world position.
-        let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
-
-        // Check if the circle's center lies inside the AABB.
-        let is_inside = circle_world_pos.x >= world_min.x
-            && circle_world_pos.x <= world_max.x
-            && circle_world_pos.y >= world_min.y
-            && circle_world_pos.y <= world_max.y;
-
-        // Depending on whether the center is inside, choose how to compute the collision.
-        let (normal, penetration, contact_point) = if is_inside {
-            // Compute distances from the circle's center to each AABB edge.
-            let dist_left = circle_world_pos.x - world_min.x;
-            let dist_right = world_max.x - circle_world_pos.x;
-            let dist_bottom = circle_world_pos.y - world_min.y;
-            let dist_top = world_max.y - circle_world_pos.y;
-
-            // Pick the smallest distance to determine the nearest edge.
-            let min_distance = dist_left.min(dist_right).min(dist_bottom.min(dist_top));
-            // From the AABB perspective, choose the normal such that it points outward.
-            // (Notice the signs are reversed compared to the circle-first case.)
-            let normal = if min_distance == dist_left {
-                Vec2::X // circle is closest to left edge; push rightward
-            } else if min_distance == dist_right {
-                -Vec2::X // closest to right; push leftward
-            } else if min_distance == dist_bottom {
-                Vec2::Y // closest to bottom; push upward
-            } else {
-                -Vec2::Y // closest to top; push downward
-            };
-            // Penetration is how far the circle's radius exceeds the minimal distance.
-            let penetration = *radius - min_distance;
-            // Place the contact point at the circle's perimeter along the collision normal.
-            let contact_point = circle_world_pos - normal * (*radius);
-            (normal, penetration, contact_point)
-        } else {
-            // If the circle center is outside the AABB, use clamping.
-            let nearest_point = point_aabb_nearest_point(circle_world_pos, aabb, aabb_body);
-            let collision_vector = circle_world_pos - nearest_point;
-            let dist = collision_vector.length();
-            let normal = if dist == 0.0 {
-                // Fallback in case of an unlikely zero-length vector.
-                Vec2::X
-            } else {
-                collision_vector / dist
-            };
-            let penetration = *radius - dist;
-            (normal, penetration, nearest_point)
-        };
-
-        // If there is penetration, a collision contact is detected.
-        if penetration > 0.0 {
-            return Some(Contact {
-                point: contact_point,
-                pen_depth: penetration,
-                normal: normal.normalize(),
-                body_a_index: aabb_index,
-                body_b_index: circle_index,
-            });
-        }
-    }
-    None
+    let con = test_circle_aabb(
+        circle,
+        aabb,
+        circle_body,
+        aabb_body,
+        aabb_index,
+        circle_index,
+    );
+    let Some(mut contact) = con else {
+        return None;
+    };
+    contact.normal *= -1.0;
+    Some(contact)
 }
 
 fn test_circle_aabb(
@@ -395,12 +472,6 @@ impl Collider {
         body_a_index: usize,
         body_b_index: usize,
     ) -> Option<Contact> {
-        // HACK: This is not actually needed, because you can obviously have collisions between
-        // non-static objects
-        // if !(my_body.is_static || other_body.is_static) {
-        //     return None;
-        // }
-
         match (self, collider_b) {
             // two circles collide if the squared distance between them is smaller than the sum of their squared radii
             (
@@ -583,18 +654,18 @@ fn handle_camera_movement(camera: &mut Camera) {
         camera.zoom_out();
     }
     if is_key_down(KeyCode::A) {
-        camera.pos += -Vec2::X * 2.0;
+        camera.pos += -Vec2::X
     }
 
     if is_key_down(KeyCode::D) {
-        camera.pos += Vec2::X * 2.0;
+        camera.pos += Vec2::X
     }
 
     if is_key_down(KeyCode::W) {
-        camera.pos += Vec2::Y * 2.0;
+        camera.pos += Vec2::Y
     }
     if is_key_down(KeyCode::S) {
-        camera.pos += -Vec2::Y * 2.0;
+        camera.pos += -Vec2::Y
     }
 }
 
@@ -623,8 +694,10 @@ fn resolve_interpenetration(objects: &mut [Object], contact: &Contact, dt: f32) 
     let v_n = (body_b.vel - body_a.vel).dot(contact.normal);
 
     // slop is there to reduce jittering
-    let slop = 0.02; // allow for 1 cm of slop
+    let slop = 0.01; // allow for 1 cm of slop
 
+    // this makes it so that the bodies don't drastically move apart but are rather gently moved
+    // apart each frame
     let bias_factor = 0.2;
     let bias_vel = (bias_factor / dt) * f32::max(0.0, contact.pen_depth - slop);
 
@@ -637,15 +710,15 @@ fn resolve_interpenetration(objects: &mut [Object], contact: &Contact, dt: f32) 
     // magnitude of the impulse
     // if the relative velocity is greater than zero, the bodies are already
     // moving apart
-    let restitution = 0.5;
-    let P_n = f32::max(((1.0 + restitution) * (-v_n + bias_vel)) / k_n, 0.0);
-    let P = P_n * contact.normal;
+    let restitution = body_a.restitution * body_b.restitution;
+    let p_n = f32::max(((1.0 + restitution) * (-v_n + bias_vel)) / k_n, 0.0);
+    let p = p_n * contact.normal;
 
     if !body_a.is_static {
-        body_a.apply_impulse(-P);
+        body_a.apply_impulse(-p);
     }
     if !body_b.is_static {
-        body_b.apply_impulse(P);
+        body_b.apply_impulse(p);
     }
 }
 
@@ -687,18 +760,16 @@ fn apply_gravity(objects: &mut [Object]) {
 #[macroquad::main("Physixx")]
 async fn main() {
     // circle
-    let mut rg1: RigidBody2D = RigidBody2D {
-        position: vec2(0.0, 0.0),
-        acc: vec2(0.0, 0.0),
-        vel: vec2(0.0, 0.0),
-        accum_force: vec2(0.0, 0.0),
-        inverse_mass: 1.0 / 5.0,
-        is_static: false,
-    };
     let col1: Collider = Collider::Circle {
         offset: vec2(0.0, 0.0),
         radius: 3.0,
     };
+    let mut rg1 = RigidBody2DBuilder::new()
+        .with_shape(col1.clone())
+        .with_position(vec2(10.0, 10.0))
+        .with_restitution(1.0)
+        .with_inverse_mass(1.0)
+        .build();
     let obj1: Object = ObjectBuilder::new()
         .with_body(rg1)
         .with_collider(col1)
@@ -706,19 +777,16 @@ async fn main() {
         .with_name("circle".to_string())
         .build();
 
-    // Rectangle 2
-    let mut rg2: RigidBody2D = RigidBody2D {
-        position: vec2(-100.0, -10.0),
-        vel: vec2(0.0, 0.0),
-        acc: vec2(0.0, 0.0),
-        accum_force: vec2(0.0, 0.0),
-        inverse_mass: 1.0 / 1000.0,
-        is_static: true,
-    };
     let col2: Collider = Collider::AABB {
         min: vec2(0.0, -10.0),
         max: vec2(200.0, 0.0),
     };
+    let mut rg2 = RigidBody2DBuilder::new()
+        .make_static()
+        .with_position(Vec2::ZERO)
+        .with_shape(col2.clone())
+        .with_restitution(0.3)
+        .build();
     let obj2: Object = ObjectBuilder::new()
         .with_body(rg2)
         .with_collider(col2)
@@ -727,18 +795,16 @@ async fn main() {
         .build();
 
     // Rectangle 3
-    let mut rg3: RigidBody2D = RigidBody2D {
-        position: vec2(-30.0, 20.0),
-        vel: vec2(1.0, -2.0),
-        acc: vec2(0.0, 0.0),
-        accum_force: vec2(0.0, 0.0),
-        inverse_mass: 1.0 / 100.0,
-        is_static: false,
-    };
     let col3: Collider = Collider::AABB {
         min: vec2(0.0, -10.0),
         max: vec2(20.0, 0.0),
     };
+    let mut rg3: RigidBody2D = RigidBody2DBuilder::new()
+        .with_shape(col3.clone())
+        .with_position(vec2(-30.0, 10.0))
+        .with_inverse_mass(1.0 / 300.0)
+        .build();
+
     let obj3: Object = ObjectBuilder::new()
         .with_body(rg3)
         .with_collider(col3)
@@ -746,7 +812,7 @@ async fn main() {
         .with_name("some_rect".to_string())
         .build();
 
-    let mut objects = [obj2, obj1, obj3];
+    let mut objects = [obj1, obj2, obj3];
     let mut camera = Camera::default();
 
     loop {
@@ -759,25 +825,28 @@ async fn main() {
 
         // apply_gravity
         apply_gravity(&mut objects);
-        let contacts = check_collision(&mut objects);
-        for contact in contacts {
-            let screen_point = camera.world_to_screen(contact.point);
-            draw_circle_lines(screen_point.x, screen_point.y, 1.0, 1.0, BLACK);
-            let screen_point = camera.world_to_screen(contact.point);
-            let normal = vec2(contact.normal.x, -contact.normal.y); // flip Y
-            let normal_end = screen_point + normal * 10.0; // scale for visibility
+        let iterations = 15; // the accuracy increases with the number of iterations
+        for _ in 0..iterations {
+            let contacts = check_collision(&mut objects);
+            for contact in contacts {
+                let screen_point = camera.world_to_screen(contact.point);
+                draw_circle_lines(screen_point.x, screen_point.y, 1.0, 1.0, BLACK);
+                let screen_point = camera.world_to_screen(contact.point);
+                let normal = vec2(contact.normal.x, -contact.normal.y); // flip Y
+                let normal_end = screen_point + normal * 10.0; // scale for visibility
 
-            draw_circle_lines(screen_point.x, screen_point.y, 2.0, 1.0, BLACK);
+                draw_circle_lines(screen_point.x, screen_point.y, 2.0, 1.0, BLACK);
 
-            draw_line(
-                screen_point.x,
-                screen_point.y,
-                normal_end.x,
-                normal_end.y,
-                1.0,
-                RED,
-            );
-            resolve_interpenetration(&mut objects, &contact, dt);
+                draw_line(
+                    screen_point.x,
+                    screen_point.y,
+                    normal_end.x,
+                    normal_end.y,
+                    1.0,
+                    RED,
+                );
+                resolve_interpenetration(&mut objects, &contact, dt);
+            }
         }
         for object in objects.as_mut() {
             object.body.as_mut().unwrap().update(dt);
