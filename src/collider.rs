@@ -1,13 +1,141 @@
 use crate::Contact;
 use crate::rigid_body::*;
-use crate::test_aabb_circle;
-use crate::test_circle_aabb;
 use macroquad::prelude::*;
 
 #[derive(Clone)]
 pub enum Collider {
     Circle { offset: Vec2, radius: f32 },
     AABB { min: Vec2, max: Vec2 },
+}
+
+/// returns the point on the aabb surface that is nearest to the given point
+fn point_aabb_nearest_point(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> Vec2 {
+    if let Collider::AABB { min, max } = aabb {
+        let world_min = body.position + *min;
+        let world_max = body.position + *max;
+        let mut nearest_point = vec2(0.0, 0.0);
+
+        if point.x <= world_max.x && point.x >= world_min.x {
+            nearest_point.x = point.x
+        } else if point.x < world_min.x {
+            nearest_point.x = world_min.x;
+        } else if point.x > world_max.x {
+            nearest_point.x = world_max.x;
+        } else if point.x - world_min.x > world_max.x - point.x {
+            nearest_point.x = world_max.x;
+        } else {
+            nearest_point.x = world_min.x
+        }
+
+        if point.y <= world_max.y && point.y >= world_min.y {
+            nearest_point.y = point.y
+        } else if point.y < world_min.y {
+            nearest_point.y = world_min.y;
+        } else if point.y > world_max.y {
+            nearest_point.y = world_max.y;
+        } else if point.y - world_min.y > world_max.y - point.y {
+            nearest_point.y = world_max.y;
+        } else {
+            nearest_point.y = world_min.y
+        }
+
+        nearest_point
+    } else {
+        panic!();
+    }
+}
+
+fn is_close_to_zero(vector: Vec2) -> bool {
+    approx::abs_diff_eq!(vector.x, 0.0) && approx::abs_diff_eq!(vector.y, 0.0)
+}
+fn test_aabb_circle(
+    aabb: &Collider,
+    circle: &Collider,
+    aabb_body: &RigidBody2D,
+    circle_body: &RigidBody2D,
+    aabb_index: usize,
+    circle_index: usize,
+) -> Option<Contact> {
+    let con = test_circle_aabb(
+        circle,
+        aabb,
+        circle_body,
+        aabb_body,
+        aabb_index,
+        circle_index,
+    );
+    let Some(mut contact) = con else {
+        return None;
+    };
+    contact.normal *= -1.0;
+    Some(contact)
+}
+
+fn test_circle_aabb(
+    circle: &Collider,
+    aabb: &Collider,
+    circle_body: &RigidBody2D,
+    aabb_body: &RigidBody2D,
+    circle_index: usize,
+    aabb_index: usize,
+) -> Option<Contact> {
+    match (circle, aabb) {
+        (Collider::Circle { radius, .. }, Collider::AABB { min, max }) => {
+            // Get the circle's world position.
+            let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
+            // Compute the squared distance from the circle's center to the AABB.
+            let nearest_point_to_center =
+                point_aabb_nearest_point(circle_world_pos, aabb, aabb_body);
+
+            let dist = Vec2::distance(nearest_point_to_center, circle_world_pos);
+            let collision_vector = nearest_point_to_center - circle_world_pos;
+
+            let world_min = *min + aabb_body.position;
+            let world_max = *max + aabb_body.position;
+
+            let mut normal = collision_vector;
+            if is_close_to_zero(normal) {
+                let distance_left = (circle_world_pos.x - world_min.x).abs();
+                let distance_right = (circle_world_pos.x - world_max.x).abs();
+                let distance_bottom = (circle_world_pos.y - world_min.y).abs();
+                let distance_top = (circle_world_pos.y - world_max.y).abs();
+
+                let min_distance = f32::min(
+                    distance_left,
+                    f32::min(distance_right, f32::min(distance_bottom, distance_top)),
+                );
+
+                if min_distance == distance_left {
+                    normal = -Vec2::X;
+                }
+                if min_distance == distance_right {
+                    normal = Vec2::X;
+                }
+                if min_distance == distance_bottom {
+                    normal = -Vec2::Y;
+                }
+                if min_distance == distance_top {
+                    normal = Vec2::Y;
+                }
+            }
+
+            normal = normal.normalize();
+
+            // if a collision has occured, compute how it actually happened
+            if dist < *radius {
+                Some(Contact {
+                    point: nearest_point_to_center,
+                    pen_depth: *radius - dist,
+                    normal,
+                    body_a_index: circle_index,
+                    body_b_index: aabb_index,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 impl Collider {

@@ -13,43 +13,6 @@ use macroquad::ui::root_ui;
 use object::*;
 use rigid_body::*;
 
-// returns the point on the aabb surface that is nearest to the given point
-fn point_aabb_nearest_point(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> Vec2 {
-    if let Collider::AABB { min, max } = aabb {
-        let world_min = body.position + *min;
-        let world_max = body.position + *max;
-        let mut nearest_point = vec2(0.0, 0.0);
-
-        if point.x <= world_max.x && point.x >= world_min.x {
-            nearest_point.x = point.x
-        } else if point.x < world_min.x {
-            nearest_point.x = world_min.x;
-        } else if point.x > world_max.x {
-            nearest_point.x = world_max.x;
-        } else if point.x - world_min.x > world_max.x - point.x {
-            nearest_point.x = world_max.x;
-        } else {
-            nearest_point.x = world_min.x
-        }
-
-        if point.y <= world_max.y && point.y >= world_min.y {
-            nearest_point.y = point.y
-        } else if point.y < world_min.y {
-            nearest_point.y = world_min.y;
-        } else if point.y > world_max.y {
-            nearest_point.y = world_max.y;
-        } else if point.y - world_min.y > world_max.y - point.y {
-            nearest_point.y = world_max.y;
-        } else {
-            nearest_point.y = world_min.y
-        }
-
-        nearest_point
-    } else {
-        panic!();
-    }
-}
-
 // https://www.r-5.org/files/books/computers/algo-list/realtime-3d/Christer_Ericson-Real-Time_Collision_Detection-EN.pdf
 fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
     if let Collider::AABB { min, max } = aabb {
@@ -76,100 +39,6 @@ fn sq_dist_point_aabb(point: Vec2, aabb: &Collider, body: &RigidBody2D) -> f32 {
         sq_dist
     } else {
         panic!("sq_dist_aabb called on non-AABB collider");
-    }
-}
-
-fn is_close_to_zero(vector: Vec2) -> bool {
-    approx::abs_diff_eq!(vector.x, 0.0) && approx::abs_diff_eq!(vector.y, 0.0)
-}
-
-fn test_aabb_circle(
-    aabb: &Collider,
-    circle: &Collider,
-    aabb_body: &RigidBody2D,
-    circle_body: &RigidBody2D,
-    aabb_index: usize,
-    circle_index: usize,
-) -> Option<Contact> {
-    let con = test_circle_aabb(
-        circle,
-        aabb,
-        circle_body,
-        aabb_body,
-        aabb_index,
-        circle_index,
-    );
-    let Some(mut contact) = con else {
-        return None;
-    };
-    contact.normal *= -1.0;
-    Some(contact)
-}
-
-fn test_circle_aabb(
-    circle: &Collider,
-    aabb: &Collider,
-    circle_body: &RigidBody2D,
-    aabb_body: &RigidBody2D,
-    circle_index: usize,
-    aabb_index: usize,
-) -> Option<Contact> {
-    match (circle, aabb) {
-        (Collider::Circle { radius, .. }, Collider::AABB { min, max }) => {
-            // Get the circle's world position.
-            let circle_world_pos = circle.world_circle(circle_body.position).unwrap();
-            // Compute the squared distance from the circle's center to the AABB.
-            let nearest_point_to_center =
-                point_aabb_nearest_point(circle_world_pos, aabb, aabb_body);
-
-            let dist = Vec2::distance(nearest_point_to_center, circle_world_pos);
-            let collision_vector = nearest_point_to_center - circle_world_pos;
-
-            let world_min = *min + aabb_body.position;
-            let world_max = *max + aabb_body.position;
-
-            let mut normal = collision_vector;
-            if is_close_to_zero(normal) {
-                let distance_left = (circle_world_pos.x - world_min.x).abs();
-                let distance_right = (circle_world_pos.x - world_max.x).abs();
-                let distance_bottom = (circle_world_pos.y - world_min.y).abs();
-                let distance_top = (circle_world_pos.y - world_max.y).abs();
-
-                let min_distance = f32::min(
-                    distance_left,
-                    f32::min(distance_right, f32::min(distance_bottom, distance_top)),
-                );
-
-                if min_distance == distance_left {
-                    normal = -Vec2::X;
-                }
-                if min_distance == distance_right {
-                    normal = Vec2::X;
-                }
-                if min_distance == distance_bottom {
-                    normal = -Vec2::Y;
-                }
-                if min_distance == distance_top {
-                    normal = Vec2::Y;
-                }
-            }
-
-            normal = normal.normalize();
-
-            // if a collision has occured, compute how it actually happened
-            if dist < *radius {
-                Some(Contact {
-                    point: nearest_point_to_center,
-                    pen_depth: *radius - dist,
-                    normal,
-                    body_a_index: circle_index,
-                    body_b_index: aabb_index,
-                })
-            } else {
-                None
-            }
-        }
-        _ => None,
     }
 }
 
@@ -224,9 +93,16 @@ fn resolve_interpenetration(objects: &mut [Object], contact: &Contact, dt: f32) 
     let body_a = l[contact.body_a_index].body.as_mut().unwrap();
     let body_b = r[0].body.as_mut().unwrap();
 
+    let relative_vel = (body_b.vel - body_a.vel);
+    // according to documentation, .perp() rotates the vector clockwise by 90 degrees
+    let tangent = contact.normal.perp();
+
+    // tangent velocity
+    let v_t = relative_vel.dot(tangent);
+
     // relative velocity along the normal
     // TODO: add angular velocity to the calculation
-    let v_n = (body_b.vel - body_a.vel).dot(contact.normal);
+    let v_n = relative_vel.dot(contact.normal);
 
     // slop is there to reduce jittering
     let slop = 0.01; // allow for 1 cm of slop
@@ -241,17 +117,29 @@ fn resolve_interpenetration(objects: &mut [Object], contact: &Contact, dt: f32) 
     // this is quasi the effective mass
     let k_n = body_a.inverse_mass + body_b.inverse_mass;
 
+    // this is the effective mass for the friction calculation
+    // here we dot multiply with tangent vector instead of the normal vector
+    let k_t = body_a.inverse_mass + body_b.inverse_mass;
+
     // magnitude of the impulse
     // if the relative velocity is greater than zero, the bodies are already
     // moving apart
     let restitution = body_a.restitution * body_b.restitution;
     let p_n = f32::max(((1.0 + restitution) * (-v_n + bias_vel)) / k_n, 0.0);
+
+    // friction impulse
+    let actual_mu = body_a.mu * body_b.mu;
+    let p_t = f32::clamp(-v_t / k_t, -actual_mu * p_n, actual_mu * p_n);
+
+    let p_friction = p_t * tangent;
     let p = p_n * contact.normal;
 
     if !body_a.is_static {
+        body_a.apply_impulse(-p_friction);
         body_a.apply_impulse(-p);
     }
     if !body_b.is_static {
+        body_b.apply_impulse(p_friction);
         body_b.apply_impulse(p);
     }
 }
@@ -294,15 +182,35 @@ fn apply_gravity(objects: &mut [Object]) {
 #[macroquad::main("Physixx")]
 async fn main() {
     // circle
-    let col1 = Collider::Circle {
+    let col0 = Collider::Circle {
         offset: vec2(0.0, 0.0),
         radius: 3.0,
+    };
+    let mut rg0 = RigidBody2DBuilder::new()
+        .with_shape(col0.clone())
+        .with_position(vec2(200.0, 10.0))
+        .with_restitution(1.0)
+        .with_inverse_mass(0.00000000001)
+        .with_vel(vec2(-45.0, 0.0))
+        .build();
+    let obj0 = ObjectBuilder::new()
+        .with_body(rg0)
+        .with_collider(col0)
+        .with_color(YELLOW)
+        .with_name("circle".to_string())
+        .build();
+
+    // circle
+    let col1 = Collider::Circle {
+        offset: vec2(0.0, 0.0),
+        radius: 0.5,
     };
     let mut rg1 = RigidBody2DBuilder::new()
         .with_shape(col1.clone())
         .with_position(vec2(10.0, 10.0))
         .with_restitution(1.0)
         .with_inverse_mass(1.0)
+        .with_vel(vec2(-10.0, 0.0))
         .build();
     let obj1 = ObjectBuilder::new()
         .with_body(rg1)
@@ -317,7 +225,7 @@ async fn main() {
     };
     let mut rg2 = RigidBody2DBuilder::new()
         .make_static()
-        .with_position(Vec2::ZERO)
+        .with_position(vec2(-50.0, 0.0))
         .with_shape(col2.clone())
         .with_restitution(0.3)
         .build();
@@ -336,7 +244,7 @@ async fn main() {
     let mut rg3 = RigidBody2DBuilder::new()
         .with_shape(col3.clone())
         .with_position(vec2(-30.0, 10.0))
-        .with_inverse_mass(1.0 / 300.0)
+        .with_inverse_mass(1.0 / 300000000000.0)
         .build();
 
     let obj3 = ObjectBuilder::new()
@@ -346,7 +254,7 @@ async fn main() {
         .with_name("some_rect".to_string())
         .build();
 
-    let mut objects = [obj1, obj2, obj3];
+    let mut objects = [obj0, obj1, obj2, obj3];
     let mut camera = Camera::default();
 
     loop {
@@ -355,11 +263,11 @@ async fn main() {
         draw_zoom_ui(camera.zoom);
 
         clear_background(WHITE);
-        let dt = 1. / 60.;
+        let dt = get_frame_time();
 
         // apply_gravity
         apply_gravity(&mut objects);
-        let iterations = 15; // the accuracy increases with the number of iterations
+        let iterations = 10; // the accuracy increases with the number of iterations
         for _ in 0..iterations {
             let contacts = check_collision(&mut objects);
             for contact in contacts {

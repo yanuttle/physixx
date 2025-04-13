@@ -14,6 +14,7 @@ pub struct RigidBody2DBuilder {
     is_static: bool,
     shape: Option<Collider>,
     restitution: f32,
+    mu: f32,
 }
 
 impl RigidBody2DBuilder {
@@ -30,6 +31,7 @@ impl RigidBody2DBuilder {
             is_static: false,
             shape: None,
             restitution: 0.5,
+            mu: 0.3,
         }
     }
 
@@ -73,6 +75,11 @@ impl RigidBody2DBuilder {
         self
     }
 
+    pub fn with_mu(mut self, mu: f32) -> Self {
+        self.mu = mu;
+        self
+    }
+
     pub fn build(self) -> RigidBody2D {
         // calculate the inverse inertia of the body if a shape was provided
         let mut rb = RigidBody2D {
@@ -86,6 +93,7 @@ impl RigidBody2DBuilder {
             inverse_inertia: self.inverse_inertia,
             is_static: self.is_static,
             restitution: self.restitution,
+            mu: self.mu,
         };
 
         if rb.is_static {
@@ -126,6 +134,8 @@ pub struct RigidBody2D {
     pub inverse_inertia: f32,
     pub is_static: bool,
     pub restitution: f32,
+    pub mu: f32, // coefficient of friction for this object
+                 // this is not accurate but i will do it just like with restitution
 }
 
 impl RigidBody2D {
